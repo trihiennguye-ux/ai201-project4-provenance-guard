@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import sqlite3
 from uuid import uuid4
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, json 
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
@@ -104,7 +104,7 @@ def submit():
         timestamp=analyzed_at,
     )
 
-    return jsonify(response_body), 200
+    return json.dumps(response_body, sort_keys=False), 200
 
 
 def _attribution_from_signal(score, details):
