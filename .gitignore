@@ -1,1 +1,7 @@
+# Python
 .env
+
+# SQLite
+*.db
+*.sqlite
+*.sqlite3
