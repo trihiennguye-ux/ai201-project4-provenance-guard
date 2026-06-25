@@ -27,13 +27,12 @@ def analyze(text: str) -> tuple[float, dict]:
     word_count = len(words)
     sentence_count = len(sentence_lengths)
 
-    if sentence_count < 3 or word_count < 30:
+    if word_count < 15:
         return 0.5, {
-            "note": "insufficient text",
             "fallback": True,
-            "word_count": word_count,
-            "sentence_count": sentence_count,
-        }
+            "note": "low_text_length",
+            "confidence_penalty": 0.3
+    }
 
     cv = _coefficient_of_variation(sentence_lengths)
     ttr = len(set(words)) / word_count

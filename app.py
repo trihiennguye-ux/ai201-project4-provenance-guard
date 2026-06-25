@@ -7,6 +7,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
 from signals.stylometric import analyze as analyze_stylometric
+from signals.llm_classifier import analyze as analyze_llm
 
 app = Flask(__name__)
 limiter = Limiter(get_remote_address, app=app, default_limits=[])
@@ -37,31 +38,60 @@ def submit():
     content_type = body.get("content_type")
     creator_id = body.get("creator_id")
     content_id = str(uuid4())
-
-    sty_score, details = analyze_stylometric(text)
-    attribution = _attribution_from_signal(sty_score, details)
-    confidence = 0.0
-    label = _placeholder_label(attribution)
     analyzed_at = datetime.now(timezone.utc).isoformat()
+
+    # =========================
+    # Signal 1: Stylometric
+    # =========================
+    sty_score, sty_details = analyze_stylometric(text)
+
+    # =========================
+    # Signal 2: LLM classifier
+    # =========================
+    llm_score, llm_details = analyze_llm(text)
+
+    # =========================
+    # Attribution logic (combined)
+    # =========================
+    # You can tune this later; simple fusion for now:
+    combined_score = 0.7 * llm_score + 0.3 * sty_score
+
+    attribution = _attribution_from_signal(combined_score, {
+        "fallback": sty_details.get("fallback") or llm_details.get("fallback")
+    })
+
+    confidence = 0.0  # still placeholder
+
+    label = _placeholder_label(attribution)
 
     response_body = {
         "content_id": content_id,
         "content_type": content_type,
         "creator_id": creator_id,
         "attribution": attribution,
-        "llm_score": sty_score,
+
+        # keep both signals explicit
+        "stylometric_score": sty_score,
+        "llm_score": llm_score,
+        "combined_score": combined_score,
+
         "confidence": confidence,
         "signals": [
             {
                 "name": "stylometric_heuristics",
                 "score": sty_score,
-                "attribution": attribution,
-                "details": details,
+                "attribution": _attribution_from_signal(sty_score, sty_details),
+                "details": sty_details,
+            },
+            {
+                "name": "llm_authorship_classifier",
+                "score": llm_score,
+                "attribution": _attribution_from_signal(llm_score, llm_details),
+                "details": llm_details,
             }
         ],
         "label": label,
-        "status": "analyzed",
-        "analyzed_at": analyzed_at,
+        "status": "analyzed"
     }
 
     _write_audit_log(
@@ -69,7 +99,7 @@ def submit():
         creator_id=creator_id,
         attribution=attribution,
         confidence=confidence,
-        llm_score=sty_score,
+        llm_score=combined_score,
         status=response_body["status"],
         timestamp=analyzed_at,
     )
@@ -181,3 +211,4 @@ def _ensure_audit_log(connection):
 
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
+
