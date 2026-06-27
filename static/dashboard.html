@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Provenance Guard — Analytics</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"
+          crossorigin="anonymous"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0f172a;
+      --surface:  #1e293b;
+      --border:   #334155;
+      --text:     #f1f5f9;
+      --muted:    #94a3b8;
+      --accent:   #6366f1;
+      --ai:       #f87171;
+      --human:    #4ade80;
+      --uncertain:#94a3b8;
+      --strong:   #34d399;
+      --moderate: #fbbf24;
+      --weak:     #f87171;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+      padding: 2rem 2.5rem;
+    }
+
+    /* ── Header ────────────────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      margin-bottom: 1.75rem;
+      padding-bottom: 1.25rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .logo-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent);
+      flex-shrink: 0;
+    }
+
+    h1 {
+      font-size: 1.125rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text);
+    }
+
+    h1 .slash {
+      color: var(--border);
+      margin: 0 0.35rem;
+      font-weight: 300;
+    }
+
+    h1 .sub {
+      color: var(--muted);
+      font-weight: 400;
+    }
+
+    .header-right {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 0.2rem;
+    }
+
+    .refresh-indicator {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+
+    .refresh-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--strong);
+      animation: pulse-dot 3s ease-in-out infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.4; transform: scale(0.8); }
+    }
+
+    #lastUpdated {
+      font-size: 0.7rem;
+      color: var(--border);
+    }
+
+    /* ── Error banner ──────────────────────────────────────────────────────── */
+    .error-banner {
+      background: #1c0a0a;
+      border: 1px solid #7f1d1d;
+      border-radius: 8px;
+      padding: 0.875rem 1.25rem;
+      margin-bottom: 1.5rem;
+      color: #fca5a5;
+      font-size: 0.8rem;
+      display: none;
+    }
+
+    /* ── Summary strip ─────────────────────────────────────────────────────── */
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.125rem 1.375rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 2px;
+      background: var(--accent);
+      opacity: 0.5;
+    }
+
+    .stat-label {
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+    }
+
+    .stat-value {
+      font-size: 1.875rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1;
+      min-height: 2rem;
+    }
+
+    .stat-sub {
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-top: 0.35rem;
+    }
+
+    /* ── Chart grid ────────────────────────────────────────────────────────── */
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1rem;
+    }
+
+    .chart-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.375rem 1.5rem 1.5rem;
+    }
+
+    .chart-header {
+      margin-bottom: 1rem;
+    }
+
+    .chart-title {
+      font-size: 0.875rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--text);
+    }
+
+    .chart-subtitle {
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-top: 0.2rem;
+      line-height: 1.4;
+    }
+
+    .chart-container {
+      position: relative;
+      height: 230px;
+    }
+
+    .empty-state {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 230px;
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-align: center;
+      padding: 0 1.5rem;
+      line-height: 1.5;
+    }
+
+    /* ── Skeleton loading ──────────────────────────────────────────────────── */
+    .skeleton {
+      display: inline-block;
+      background: linear-gradient(90deg, var(--border) 25%, var(--surface) 50%, var(--border) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 4px;
+      min-width: 3rem;
+    }
+    .skeleton-text { height: 1em; }
+
+    @keyframes shimmer {
+      0%   { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    /* ── Responsive ────────────────────────────────────────────────────────── */
+    @media (max-width: 960px) {
+      .summary-grid { grid-template-columns: repeat(2, 1fr); }
+      .charts-grid  { grid-template-columns: 1fr; }
+      body { padding: 1.25rem; }
+    }
+
+    @media (max-width: 500px) {
+      .summary-grid { grid-template-columns: 1fr; }
+      h1 .sub { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo">
+      <div class="logo-dot"></div>
+      <h1>Provenance Guard<span class="slash">/</span><span class="sub">Analytics</span></h1>
+    </div>
+    <div class="header-right">
+      <div class="refresh-indicator">
+        <div class="refresh-dot"></div>
+        Auto-refreshes every 30s
+      </div>
+      <div id="lastUpdated">—</div>
+    </div>
+  </header>
+
+  <div class="error-banner" id="errorBanner"></div>
+
+  <div class="summary-grid">
+    <div class="stat-card">
+      <div class="stat-label">Total Submissions</div>
+      <div class="stat-value" id="statTotal"><span class="skeleton skeleton-text" style="width:3rem"></span></div>
+      <div class="stat-sub" id="statTotalSub">&nbsp;</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Appeal Rate</div>
+      <div class="stat-value" id="statAppealRate"><span class="skeleton skeleton-text" style="width:3.5rem"></span></div>
+      <div class="stat-sub" id="statAppealSub">&nbsp;</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Avg Confidence</div>
+      <div class="stat-value" id="statConfidence"><span class="skeleton skeleton-text" style="width:3rem"></span></div>
+      <div class="stat-sub">across all classifications</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Most Common Label</div>
+      <div class="stat-value" id="statMostCommon" style="font-size:1.2rem;line-height:1.3">
+        <span class="skeleton skeleton-text" style="width:6rem"></span>
+      </div>
+      <div class="stat-sub" id="statMostCommonSub">&nbsp;</div>
+    </div>
+  </div>
+
+  <div class="charts-grid">
+
+    <div class="chart-card">
+      <div class="chart-header">
+        <div class="chart-title">Attribution Breakdown</div>
+        <div class="chart-subtitle">Distribution of outcomes across all submissions</div>
+      </div>
+      <div class="chart-container"><canvas id="chartAttribution"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-header">
+        <div class="chart-title">Confidence Distribution</div>
+        <div class="chart-subtitle">How often the system reaches each confidence tier — a spike in 40–60% suggests signals frequently disagree</div>
+      </div>
+      <div class="chart-container"><canvas id="chartConfidence"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-header">
+        <div class="chart-title">Appeals by Attribution</div>
+        <div class="chart-subtitle">Which classification outcomes are most frequently contested by creators</div>
+      </div>
+      <div class="chart-container"><canvas id="chartAppeals"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-header">
+        <div class="chart-title">Signal Agreement</div>
+        <div class="chart-subtitle">
+          Gap between stylometric and LLM scores (|sty − llm|) — a large
+          <span style="color:var(--weak)">weak</span> slice means the signals are frequently contradicting each other
+        </div>
+      </div>
+      <div class="chart-container" id="agreementContainer">
+        <canvas id="chartAgreement"></canvas>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    /* ── Chart.js global defaults ─────────────────────────────────────────── */
+    Chart.defaults.color       = '#94a3b8';
+    Chart.defaults.borderColor = '#334155';
+    Chart.defaults.font.family = "-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif";
+    Chart.defaults.font.size   = 12;
+
+    const C = {
+      ai:       '#f87171',
+      human:    '#4ade80',
+      uncertain:'#94a3b8',
+      strong:   '#34d399',
+      moderate: '#fbbf24',
+      weak:     '#f87171',
+      conf:     ['#3730a3','#4f46e5','#6366f1','#818cf8','#a5b4fc'],
+      border:   '#1e293b',
+    };
+
+    const ATTR_LABELS = {
+      ai_generated:  'AI Generated',
+      human_written: 'Human Written',
+      uncertain:     'Uncertain',
+    };
+
+    let charts = {};
+
+    function destroyChart(key) {
+      if (charts[key]) { charts[key].destroy(); delete charts[key]; }
+    }
+
+    /* ── Chart renderers ──────────────────────────────────────────────────── */
+    function renderAttribution(data) {
+      destroyChart('attribution');
+      const bd = data.attribution_breakdown;
+      const ctx = document.getElementById('chartAttribution').getContext('2d');
+      charts.attribution = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['AI Generated', 'Human Written', 'Uncertain'],
+          datasets: [{
+            data: [bd.ai_generated, bd.human_written, bd.uncertain],
+            backgroundColor: [C.ai, C.human, C.uncertain],
+            borderColor: C.border,
+            borderWidth: 3,
+            hoverOffset: 8,
+          }],
+        },
+        options: {
+          cutout: '62%',
+          animation: { duration: 500 },
+          plugins: {
+            legend: {
+              position: 'bottom',
+              labels: { padding: 18, usePointStyle: true, pointStyleWidth: 9 },
+            },
+            tooltip: {
+              callbacks: {
+                label(ctx) {
+                  const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
+                  const pct   = total > 0 ? ((ctx.raw / total) * 100).toFixed(1) : '0.0';
+                  return ` ${ctx.label}: ${ctx.raw} (${pct}%)`;
+                },
+              },
+            },
+          },
+        },
+      });
+    }
+
+    function renderConfidence(data) {
+      destroyChart('confidence');
+      const dist = data.confidence_distribution;
+      const ctx  = document.getElementById('chartConfidence').getContext('2d');
+      charts.confidence = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: dist.map(d => d.bucket),
+          datasets: [{
+            label: 'Submissions',
+            data: dist.map(d => d.count),
+            backgroundColor: C.conf,
+            borderRadius: 5,
+            borderSkipped: false,
+          }],
+        },
+        options: {
+          animation: { duration: 500 },
+          plugins: { legend: { display: false } },
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: { color: '#94a3b8' },
+            },
+            y: {
+              beginAtZero: true,
+              ticks: { precision: 0, color: '#94a3b8' },
+              grid: { color: '#1e3a5f22' },
+            },
+          },
+        },
+      });
+    }
+
+    function renderAppeals(data) {
+      destroyChart('appeals');
+      const ab  = data.appeal_by_attribution;
+      const ctx = document.getElementById('chartAppeals').getContext('2d');
+      charts.appeals = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: ['AI Generated', 'Human Written', 'Uncertain'],
+          datasets: [{
+            label: 'Appeals filed',
+            data: [ab.ai_generated, ab.human_written, ab.uncertain],
+            backgroundColor: [C.ai, C.human, C.uncertain],
+            borderRadius: 5,
+            borderSkipped: false,
+          }],
+        },
+        options: {
+          indexAxis: 'y',
+          animation: { duration: 500 },
+          plugins: { legend: { display: false } },
+          scales: {
+            x: {
+              beginAtZero: true,
+              ticks: { precision: 0, color: '#94a3b8' },
+              grid: { color: '#1e3a5f22' },
+            },
+            y: {
+              grid: { display: false },
+              ticks: { color: '#94a3b8' },
+            },
+          },
+        },
+      });
+    }
+
+    function renderAgreement(data) {
+      destroyChart('agreement');
+      const sa    = data.signal_agreement;
+      const total = sa.strong + sa.moderate + sa.weak;
+      const container = document.getElementById('agreementContainer');
+
+      if (total === 0) {
+        // Pre-migration rows have NULL for sty_score/llm_score; show a
+        // clear empty state rather than an empty chart.
+        container.innerHTML =
+          '<div class="empty-state">No signal data yet.<br>' +
+          'Submit content after deploying M6 to populate this chart.</div>';
+        return;
+      }
+
+      // Restore canvas if we previously replaced it with an empty-state div.
+      if (!container.querySelector('canvas')) {
+        container.innerHTML = '<canvas id="chartAgreement"></canvas>';
+      }
+
+      const ctx = document.getElementById('chartAgreement').getContext('2d');
+      charts.agreement = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['Strong  (< 0.2)', 'Moderate  (0.2 – 0.4)', 'Weak  (> 0.4)'],
+          datasets: [{
+            data: [sa.strong, sa.moderate, sa.weak],
+            backgroundColor: [C.strong, C.moderate, C.weak],
+            borderColor: C.border,
+            borderWidth: 3,
+            hoverOffset: 8,
+          }],
+        },
+        options: {
+          cutout: '62%',
+          animation: { duration: 500 },
+          plugins: {
+            legend: {
+              position: 'bottom',
+              labels: { padding: 18, usePointStyle: true, pointStyleWidth: 9 },
+            },
+            tooltip: {
+              callbacks: {
+                label(ctx) {
+                  const pct = ((ctx.raw / total) * 100).toFixed(1);
+                  return ` ${ctx.label.trim()}: ${ctx.raw} (${pct}%)`;
+                },
+              },
+            },
+          },
+        },
+      });
+    }
+
+    /* ── Summary cards ────────────────────────────────────────────────────── */
+    function updateSummary(data) {
+      const s  = data.summary;
+      const bd = data.attribution_breakdown;
+
+      document.getElementById('statTotal').textContent =
+        s.total_submissions.toLocaleString();
+      document.getElementById('statTotalSub').textContent =
+        `${s.total_appeals} appeal${s.total_appeals !== 1 ? 's' : ''} filed`;
+
+      document.getElementById('statAppealRate').textContent =
+        `${s.appeal_rate_pct}%`;
+      document.getElementById('statAppealSub').textContent =
+        `${s.total_appeals} of ${s.total_submissions} submissions`;
+
+      document.getElementById('statConfidence').textContent =
+        `${s.avg_confidence_pct}%`;
+
+      const attrKey = s.most_common_attribution;
+      const colors  = { ai_generated: C.ai, human_written: C.human, uncertain: C.uncertain };
+      const color   = colors[attrKey] || 'var(--text)';
+      document.getElementById('statMostCommon').innerHTML =
+        `<span style="color:${color}">${ATTR_LABELS[attrKey] || attrKey}</span>`;
+
+      const count = bd[attrKey] || 0;
+      const pct   = s.total_submissions > 0
+        ? Math.round(count / s.total_submissions * 100) : 0;
+      document.getElementById('statMostCommonSub').textContent =
+        `${count.toLocaleString()} submissions (${pct}%)`;
+    }
+
+    /* ── Main refresh loop ────────────────────────────────────────────────── */
+    async function refresh() {
+      try {
+        const res = await fetch('/analytics');
+        if (!res.ok) throw new Error(`Server returned HTTP ${res.status}`);
+        const data = await res.json();
+
+        document.getElementById('errorBanner').style.display = 'none';
+        document.getElementById('lastUpdated').textContent =
+          'Updated ' + new Date(data.generated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+        updateSummary(data);
+        renderAttribution(data);
+        renderConfidence(data);
+        renderAppeals(data);
+        renderAgreement(data);
+
+      } catch (err) {
+        const banner = document.getElementById('errorBanner');
+        banner.style.display = 'block';
+        banner.textContent   =
+          `Could not load analytics: ${err.message}. Is the Flask server running on this host?`;
+        document.getElementById('lastUpdated').textContent = 'Last update failed';
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 30_000);
+  </script>
+</body>
+</html>
