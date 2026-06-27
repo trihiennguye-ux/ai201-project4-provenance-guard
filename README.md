@@ -289,15 +289,6 @@ The reason: the spec's naming embeds the confidence level into the variant ident
 
 A live analytics view at `GET /dashboard` that pulls from a new `GET /analytics` endpoint and renders four charts using Chart.js. No build step — the frontend is a single static HTML file served directly by Flask from `static/dashboard.html`.
 
-### How to access it
-
-```bash
-python main.py          # start the Flask server
-open http://localhost:5000/dashboard
-```
-
-The page auto-refreshes every 30 seconds. The raw data is also available at `http://localhost:5000/analytics` as JSON.
-
 ### What each panel shows
 
 **Summary strip (top row):** Four stat cards — total submissions, appeal rate as a percentage, average confidence across all classifications, and the most common attribution label with its share of submissions.
