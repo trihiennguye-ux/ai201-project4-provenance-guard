@@ -598,3 +598,91 @@ curl "http://localhost:8000/log?per_page=5" | jq '.entries[] | {event_type, cont
 ```
  
 Gate: all label assertions must pass and all six curl checks must return the expected status codes before the milestone is considered complete. Specifically, step 5 (the 409) is the one most likely to be missing from AI-generated code — the conflict guard is easy to forget.
+
+---
+
+## 6. Analytics Dashboard
+
+### Purpose
+
+The analytics dashboard gives operators a real-time view of detection patterns, appeal behavior, and signal health. It serves two audiences: operators monitoring whether the system is producing a reasonable distribution of labels, and developers diagnosing whether the two-signal design is discriminating well or clustering near the midpoint.
+
+### Schema Extension
+
+One addition to `content_records`: two new columns, `sty_score REAL` and `llm_score REAL`, storing the per-request stylometric and LLM signal scores. These were already available in the per-request response body but were not persisted, which made the signal agreement metric impossible to query after the fact. The migration adds both columns to existing databases without data loss; rows submitted before the migration will show `NULL` for these columns and are excluded from the signal agreement chart rather than counted as zeroes.
+
+```sql
+ALTER TABLE content_records ADD COLUMN sty_score REAL;
+ALTER TABLE content_records ADD COLUMN llm_score REAL;
+```
+
+Implemented in `_ensure_schema` using a try/except guard so the migration is idempotent — running it against a fresh database or an existing one produces the same result.
+
+### New Endpoint: `GET /analytics`
+
+Aggregates from both `content_records` and `audit_log` without requiring new tables. All four metrics derive from data that already exists (or now exists with the schema extension).
+
+**Response schema:**
+```json
+{
+  "generated_at": "ISO-8601 timestamp",
+  "summary": {
+    "total_submissions": 150,
+    "total_appeals": 12,
+    "appeal_rate_pct": 8.0,
+    "avg_confidence": 0.61,
+    "avg_confidence_pct": 61.0,
+    "most_common_attribution": "ai_generated"
+  },
+  "attribution_breakdown": {
+    "ai_generated": 89,
+    "human_written": 42,
+    "uncertain": 19
+  },
+  "confidence_distribution": [
+    { "bucket": "0–20%",  "count": 5  },
+    { "bucket": "20–40%", "count": 12 },
+    { "bucket": "40–60%", "count": 45 },
+    { "bucket": "60–80%", "count": 61 },
+    { "bucket": "80–100%","count": 27 }
+  ],
+  "appeal_by_attribution": {
+    "ai_generated": 10,
+    "human_written": 1,
+    "uncertain": 1
+  },
+  "signal_agreement": {
+    "strong": 70,
+    "moderate": 50,
+    "weak": 30
+  }
+}
+```
+
+### Metrics and Rationale
+
+| Metric | Chart type | Why included |
+|---|---|---|
+| Attribution breakdown | Donut | Primary health signal. A system labeling 95%+ of submissions as AI is miscalibrated; this makes that visible immediately. |
+| Confidence distribution | Histogram (5 buckets) | Shows whether the system is discriminating or clustering near 0.5. A healthy system should have a spread; a spike in the 40–60% bucket means most results are moderate-confidence, which may indicate the signal weights need tuning. |
+| Appeal rate by attribution | Horizontal bar | Reveals which attribution type is most frequently contested. A high appeal rate on `ai_generated` relative to `human_written` is the expected pattern (AI misclassification hurts creators more). An unexpected spike on `human_written` appeals warrants investigation. |
+| Signal agreement | Donut | **Chosen additional metric.** Buckets submissions by `|llm_score − sty_score|`: strong (< 0.2), moderate (0.2–0.4), weak (> 0.4). A large weak-agreement slice means the two signals are frequently contradicting each other — this may indicate the text corpus being submitted sits in a genuinely hard-to-classify zone, or that one signal is systematically off. This metric is only meaningful after the schema migration; pre-migration rows are excluded. |
+
+### Frontend: `GET /dashboard`
+
+Served as a static HTML file at `static/dashboard.html`. Flask routes `GET /dashboard` to `app.send_static_file("dashboard.html")`. No build step, no bundler — Chart.js is loaded from cdnjs.cloudflare.com.
+
+The dashboard:
+- Fetches `/analytics` on page load
+- Auto-refreshes every 30 seconds via `setInterval`
+- Destroys and re-creates charts on each refresh (avoids Chart.js accumulation bugs)
+- Shows an error banner (not a silent failure) if the Flask server is unreachable
+- Handles empty state for signal agreement chart when no post-migration submissions exist yet
+
+Layout: a summary strip (4 stat cards) above a 2×2 chart grid. Responsive — collapses to a single column below 900px.
+
+### What this does not do
+
+- No authentication on `/analytics` or `/dashboard`. In production these would sit behind an operator auth gate.
+- No time-series queries. The confidence distribution and attribution breakdown are lifetime aggregates, not windowed trends. Adding a `?since=` query parameter to `/analytics` would enable trend views without schema changes.
+- No reviewer queue action from the dashboard. A reviewer hitting the dashboard can see appeals exist but must use `GET /log?event_type=appeal` to drill into them.

@@ -12,6 +12,9 @@ Storage model (two tables, distinct roles):
 
 GET /log supports ?event_type= and ?status= filters so a reviewer can
 isolate appeal events without touching content_records directly.
+
+GET /analytics returns aggregated detection stats for the dashboard.
+GET /dashboard serves the analytics frontend (static/dashboard.html).
 """
 
 from datetime import datetime, timezone
@@ -28,7 +31,7 @@ from signals.llm_classifier import analyze as analyze_llm
 from signals.confidence import combine_signals
 from signals.label_generator import generate_label
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static")
 limiter = Limiter(
     get_remote_address,
     app=app,
@@ -51,6 +54,125 @@ _CREATOR_REASONING_MAX = 2000
 @app.route("/")
 def home():
     return "Provenance Guard is running."
+
+
+@app.get("/dashboard")
+def dashboard():
+    """Serve the analytics dashboard frontend."""
+    return app.send_static_file("dashboard.html")
+
+
+@app.get("/analytics")
+def analytics():
+    """
+    Return aggregated detection statistics for the dashboard.
+
+    Queries both content_records and audit_log. The signal_agreement metric
+    requires sty_score and llm_score columns (added by the M6 schema migration);
+    rows submitted before the migration are excluded from that metric rather
+    than counted as zeroes.
+    """
+    with sqlite3.connect(DATABASE_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        _ensure_schema(conn)
+
+        # ── Totals ────────────────────────────────────────────────────────────
+        totals = conn.execute(
+            "SELECT COUNT(*) AS total, AVG(confidence) AS avg_conf FROM content_records"
+        ).fetchone()
+        total    = totals["total"] or 0
+        avg_conf = round(totals["avg_conf"] or 0.0, 4)
+
+        appeal_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM audit_log WHERE event_type = 'appeal'"
+        ).fetchone()["c"]
+
+        # ── Attribution breakdown ─────────────────────────────────────────────
+        attr_breakdown = {"ai_generated": 0, "human_written": 0, "uncertain": 0}
+        for row in conn.execute(
+            "SELECT attribution, COUNT(*) AS cnt FROM content_records GROUP BY attribution"
+        ).fetchall():
+            if row["attribution"] in attr_breakdown:
+                attr_breakdown[row["attribution"]] = row["cnt"]
+
+        most_common = (
+            max(attr_breakdown, key=lambda k: attr_breakdown[k])
+            if total > 0 else "—"
+        )
+
+        # ── Confidence distribution (5 equal-width buckets) ───────────────────
+        _CONF_BUCKETS = ["0–20%", "20–40%", "40–60%", "60–80%", "80–100%"]
+        conf_rows = conn.execute(
+            """
+            SELECT
+                CASE
+                    WHEN confidence < 0.2 THEN '0–20%'
+                    WHEN confidence < 0.4 THEN '20–40%'
+                    WHEN confidence < 0.6 THEN '40–60%'
+                    WHEN confidence < 0.8 THEN '60–80%'
+                    ELSE                       '80–100%'
+                END AS bucket,
+                COUNT(*) AS cnt
+            FROM content_records
+            GROUP BY bucket
+            ORDER BY MIN(confidence)
+            """
+        ).fetchall()
+        conf_map = {r["bucket"]: r["cnt"] for r in conf_rows}
+        confidence_distribution = [
+            {"bucket": b, "count": conf_map.get(b, 0)} for b in _CONF_BUCKETS
+        ]
+
+        # ── Appeals by original attribution ───────────────────────────────────
+        appeal_by_attr = {"ai_generated": 0, "human_written": 0, "uncertain": 0}
+        for row in conn.execute(
+            """
+            SELECT cr.attribution, COUNT(al.id) AS cnt
+            FROM   audit_log al
+            JOIN   content_records cr ON al.content_id = cr.content_id
+            WHERE  al.event_type = 'appeal'
+            GROUP  BY cr.attribution
+            """
+        ).fetchall():
+            if row["attribution"] in appeal_by_attr:
+                appeal_by_attr[row["attribution"]] = row["cnt"]
+
+        # ── Signal agreement (|llm_score − sty_score|, post-migration rows only)
+        signal_agreement = {"strong": 0, "moderate": 0, "weak": 0}
+        for row in conn.execute(
+            """
+            SELECT
+                CASE
+                    WHEN ABS(llm_score - sty_score) < 0.2 THEN 'strong'
+                    WHEN ABS(llm_score - sty_score) < 0.4 THEN 'moderate'
+                    ELSE                                        'weak'
+                END AS level,
+                COUNT(*) AS cnt
+            FROM content_records
+            WHERE llm_score IS NOT NULL AND sty_score IS NOT NULL
+            GROUP BY level
+            """
+        ).fetchall():
+            if row["level"] in signal_agreement:
+                signal_agreement[row["level"]] = row["cnt"]
+
+        appeal_rate = round((appeal_count / total * 100), 1) if total > 0 else 0.0
+
+        return jsonify({
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "summary": {
+                "total_submissions":      total,
+                "total_appeals":          appeal_count,
+                "appeal_rate_pct":        appeal_rate,
+                "avg_confidence":         avg_conf,
+                "avg_confidence_pct":     round(avg_conf * 100, 1),
+                "most_common_attribution": most_common,
+            },
+            "attribution_breakdown":   attr_breakdown,
+            "confidence_distribution": confidence_distribution,
+            "appeal_by_attribution":   appeal_by_attr,
+            "signal_agreement":        signal_agreement,
+        })
 
 
 @app.get("/log")
@@ -136,11 +258,15 @@ def submit():
             """
             INSERT INTO content_records
                 (content_id, creator_id, content_type, preview,
-                 attribution, ai_score, confidence, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'analyzed', ?)
+                 attribution, ai_score, confidence,
+                 sty_score, llm_score,
+                 status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'analyzed', ?)
             """,
             (content_id, creator_id, content_type, preview,
-             attribution, ai_score, confidence, analyzed_at),
+             attribution, ai_score, confidence,
+             sty_score, llm_score,
+             analyzed_at),
         )
         _append_audit_event(
             conn,
@@ -355,7 +481,7 @@ def _append_audit_event(
     )
 
 
-# ── Schema ────────────────────────────────────────────────────────────────────
+# ── Schema (with idempotent migration for M6 signal-score columns) ────────────
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
@@ -368,11 +494,22 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             attribution  TEXT NOT NULL,
             ai_score     REAL NOT NULL,
             confidence   REAL NOT NULL,
+            sty_score    REAL,
+            llm_score    REAL,
             status       TEXT NOT NULL DEFAULT 'analyzed',
             created_at   TEXT NOT NULL
         )
         """
     )
+    # Idempotent migration: add sty_score and llm_score to databases created
+    # before M6. sqlite3 raises OperationalError if the column already exists;
+    # catching it makes the migration safe to run on every startup.
+    for col in ("sty_score", "llm_score"):
+        try:
+            conn.execute(f"ALTER TABLE content_records ADD COLUMN {col} REAL")
+        except sqlite3.OperationalError:
+            pass  # column already present — nothing to do
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS audit_log (
